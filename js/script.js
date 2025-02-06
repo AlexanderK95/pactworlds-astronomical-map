@@ -64,6 +64,7 @@ class Orbit {
 //constants
 const G = 6.67430e-11,
     M = 1.988e+30,
+    ME = 5.972e+24,
     AE = 1.496e+11,
     // EY = 365.256,
     EY = 31 * 12,
@@ -72,6 +73,7 @@ const G = 6.67430e-11,
 
 let canvas, ctx, width, height, time, timestep, waypoints, distance, bodyList,
     offsetX, offsetY;
+let showGravity = false;
 
 $(document).ready(function() {
     canvas = document.getElementById("scene");
@@ -81,6 +83,13 @@ $(document).ready(function() {
     width = canvas.width;
     height = canvas.height;
     time = 0;
+
+    if (GetParameterValues('y') && GetParameterValues('m') && GetParameterValues('d')){
+        $('#year').val(GetParameterValues('y'));
+        $('#month').val(GetParameterValues('m'));
+        $('#day').val(GetParameterValues('d'));
+        setDate();
+    }
 
     timestep = parseInt($('#timestep').val());
 
@@ -176,9 +185,10 @@ function drawScene() {
         time = time + parseInt($('#timestep').val()) ** 3 / 10000;
     })
 
+    if (showGravity) {drawGravityWells();}
     drawWaypoints();
     dispDate();
-    setTimeout(drawScene, 10);
+    setTimeout(drawScene, 30);
     // console.log('done');
 
 }
@@ -199,7 +209,134 @@ var startX, startY;
 // for(var x=0;x<100;x++){ ctx.fillText(x,x*20,ch/2); }
 // for(var y=-50;y<50;y++){ ctx.fillText(y,cw/2,y*20); }
 
+function parseToFloat(str) {
+    // Remove the multiplication sign '×' if present
+    str = str.replace('×', '').trim();
 
+    // Check for fractional numbers
+    if (str.includes('/')) {
+        const parts = str.split('/');
+        if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+            return parseFloat(parts[0]) / parseFloat(parts[1]);
+        }
+    }
+
+    // Check for textual descriptions (example: 'kleiner als')
+    if (str.includes('kleiner als')) {
+        str = str.replace('kleiner als', '').trim();
+        const value = parseFloat(str);
+        if (!isNaN(value)) {
+            // Assuming 'kleiner als' implies a value slightly less than the given number.
+            // Adjust this logic as per your requirements.
+            return value - 0.001;
+        }
+    }
+
+    // Default case: directly parse the string to a float
+    return parseFloat(str.replace('.', '').replace(',', '.'));
+}
+
+function screenXtoCoordX(x) {
+    return (x - width / 2 - netPanningX) / scale * AE
+}
+function screenYtoCoordY(y) {
+    return (y - height / 2 - netPanningY) / scale * AE
+}
+
+function calculateGravityVector(point, body){
+    let pointVec = math.matrix([screenXtoCoordX(point[0]), screenYtoCoordY(point[1])]);
+    let bodyVec = math.matrix([screenXtoCoordX(body[1][0]), screenYtoCoordY(body[1][1])]);
+    let mass = parseToFloat(body[0].info.mass) * ME;
+    let diffVec = math.subtract(bodyVec, pointVec);
+    let distance = math.norm(diffVec);
+    let gravity = G * mass / distance**1.5;
+    let angle = Math.atan2(diffVec.get([1]), diffVec.get([0]));
+    let gravityVec = math.multiply(gravity, [Math.cos(angle), Math.sin(angle)]);
+
+    return gravityVec;
+}
+
+let excludedNames = new Set(['Absalom Station', 'Idari', 'Diaspora', 'Sun']);
+let scalarField, mean, std;
+function drawGravityWells() {
+    let res = 25;
+    let gravScale = 1;
+    scalarField =  Array.from({ length: Math.ceil(height/res) }, () => 
+        Array.from({ length: Math.ceil(width/res) }, () => 0)
+    );
+    for (let x = 0; x < width; x+=res) {
+        for (let y = 0; y < height; y+=res) {
+            let gravityVec = math.matrix([0, 0]);
+            for (let body of bodyList) {
+                if (excludedNames.has(body[0].name)) {
+                    continue; 
+                }
+                let gVec = calculateGravityVector([x, y], body);
+                gravityVec = math.add(gravityVec, gVec);
+            }
+            scalarField[y/res][x/res] = Math.log10(math.norm(gravityVec) * gravScale);
+            // scalarField[y/res][x/res] = math.norm(gravityVec) * gravScale;
+            // 
+            // let absGravity = Math.log(math.norm(gravityVec) * gravScale)*5;
+            // console.log(absGravity);
+            // ctx.fillStyle = `rgba(${absGravity/2}, 0, ${absGravity/2 + 50}, 1)`;
+            // ctx.fillRect(x, y, res, res);
+        }
+    }
+    // console.log(scalarField);
+    mean = math.mean(scalarField);
+    std = math.std(scalarField);
+    const values = math.multiply(math.subtract(scalarField.flat(), mean), 1/std);
+
+    // Set the dimensions of your grid
+    const gridSize = { width: scalarField[0].length, height: scalarField.length };
+
+    thresholds = d3.range(-7, 7, 0.1);
+    // Create contours
+    const contours = d3.contours()
+        .size([gridSize.width, gridSize.height])
+        .smooth(true)
+        .thresholds(thresholds)
+        (values);
+
+    // Define a color scale for the contours
+    const color = d3.scaleSequential(d3.interpolateTurbo)
+        .domain(d3.extent(values));
+
+    // Select the SVG element
+    const svg = d3.select("svg");
+    const svgWidth = width;
+    const svgHeight = height;
+
+    // Assuming gridSize is the size of your data grid
+    const xScale = d3.scaleLinear()
+        .domain([0, gridSize.width])  // Data space
+        .range([0, svgWidth]);           // SVG space
+
+    const yScale = d3.scaleLinear()
+        .domain([0, gridSize.height]) // Data space
+        .range([0, svgHeight]);          // SVG space
+
+    const paths = svg.selectAll("path")
+        .data(contours);
+    // Remove any paths that no longer exist in the new data
+    paths.exit().remove();
+
+    // Draw the contours
+    paths.enter()
+        .append("path")
+        .merge(paths) // Merge entering elements with existing elements
+        .attr("d", d3.geoPath(d3.geoTransform({
+            point: function(x, y) {
+                this.stream.point(xScale(x), yScale(y));
+            }
+        })))
+        .attr("fill", d => color(d.value))
+        .attr("stroke", "#69b3a2")
+        .attr("stroke-linejoin", "round");
+
+
+}
 
 
 function drawBody(planet, color) {
@@ -246,6 +383,10 @@ function setDate() {
         seconds = y * 12 * 31 * 24 * 3600 + (m - 1) * 31 * 24 * 3600 + (d - 1) * 24 * 3600;
     time = seconds;
     $('#timestep').val(0);
+    let params = {y:y, m:m, d:d};
+    params = $.param(params)
+    history.replaceState(null, null, '?' + params.toString());
+    console.log(params);
 }
 
 function dispDate() {
@@ -327,4 +468,14 @@ function dispBodyInfo(body) {
     $('#planetAtmosphere').text(body.info.atmosphere);
     $('#planetDay').text(body.info.day);
     $('#planetYear').text(body.info.year);
+}
+
+function GetParameterValues(param) {
+    var url = window.location.href.slice(window.location.href.indexOf('?') + 1).split('&');
+    for (var i = 0; i < url.length; i++) {
+        var urlparam = url[i].split('=');
+        if (urlparam[0] == param) {
+            return urlparam[1];
+        }
+    }
 }
